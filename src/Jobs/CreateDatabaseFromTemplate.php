@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CoreX\Tenancy\Jobs;
 
+use CoreX\Tenancy\Database\TemplateIntegrityVerifier;
 use CoreX\Tenancy\Models\Account;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -29,15 +30,24 @@ final class CreateDatabaseFromTemplate implements ShouldQueue
         public readonly Account $tenant,
     ) {}
 
-    public function handle(): bool
+    public function handle(TemplateIntegrityVerifier $templateIntegrityVerifier): bool
     {
-        $manager = $this->tenant->database()->manager();
-        $name = $this->tenant->database()->getName();
+        $tenant = Account::on((string) config('tenancy.central_connection'))->findOrFail($this->tenant->id);
+
+        $templateIntegrityVerifier->assertCurrent(
+            version: (int) $tenant->template_version,
+            clusterId: (string) $tenant->cluster_id,
+        );
+
+        $manager = $tenant->database()->manager();
+        $name = $tenant->database()->getName();
 
         if ($manager->databaseExists($name)) {
+            $templateIntegrityVerifier->assertAccount($tenant);
+
             return true;
         }
 
-        return $manager->createDatabase($this->tenant);
+        return $manager->createDatabase($tenant);
     }
 }

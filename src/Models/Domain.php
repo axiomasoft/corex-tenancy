@@ -23,6 +23,7 @@ use Stancl\Tenancy\Database\Concerns\InvalidatesTenantsResolverCache;
  * @property bool $is_primary
  * @property ?string $verification_token
  * @property ?CarbonImmutable $verified_at
+ * @property int $verification_generation
  * @property string $tls_status
  * @property ?string $ca_used
  * @property CarbonImmutable $created_at
@@ -45,6 +46,7 @@ final class Domain extends Model
         return [
             'is_primary' => 'boolean',
             'verified_at' => 'immutable_datetime',
+            'verification_generation' => 'integer',
             'deleted_at' => 'immutable_datetime',
         ];
     }

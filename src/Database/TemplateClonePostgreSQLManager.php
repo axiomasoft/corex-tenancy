@@ -42,6 +42,11 @@ final class TemplateClonePostgreSQLManager extends PostgreSQLDatabaseManager
     {
         assert($tenant instanceof Account);
 
+        app(TemplateIntegrityVerifier::class)->assertCurrent(
+            version: (int) $tenant->template_version,
+            clusterId: (string) $tenant->cluster_id,
+        );
+
         $name = $tenant->database()->getName();
         $this->validateParameter($name);
 

@@ -19,6 +19,7 @@ final readonly class PairState
         public ?string $appliedOperationId,
         public ?string $barrierId,
         public bool $denied,
+        public ?string $snapshotDigest = null,
     ) {
         Value::counter($revision);
         Value::counter($revokeGeneration);
@@ -39,6 +40,10 @@ final readonly class PairState
 
         if ($barrierId !== null) {
             Value::uuid($barrierId);
+        }
+
+        if ($snapshotDigest !== null && preg_match('/^[a-f0-9]{64}$/', $snapshotDigest) !== 1) {
+            throw new PairStoreViolation('Snapshot digest must be a canonical SHA-256 value.');
         }
     }
 }

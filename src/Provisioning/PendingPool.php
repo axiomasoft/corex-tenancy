@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CoreX\Tenancy\Provisioning;
 
+use CoreX\Tenancy\Database\TemplateIntegrityVerifier;
 use CoreX\Tenancy\Models\Account;
 use CoreX\Tenancy\ProvisionParams;
 use DateTimeInterface;
@@ -33,6 +34,7 @@ final class PendingPool
     public function __construct(
         private readonly string $centralConnection,
         private readonly StanclTenantDatabaseProvisioner $provisioner,
+        private readonly TemplateIntegrityVerifier $templateIntegrityVerifier,
     ) {}
 
     /**
@@ -91,6 +93,9 @@ final class PendingPool
             if ($candidate === null) {
                 return null;
             }
+
+            $account = Account::on($this->centralConnection)->findOrFail($candidate->id);
+            $this->templateIntegrityVerifier->assertAccount($account);
 
             DB::connection($this->centralConnection)
                 ->table('root_accounts')
@@ -185,6 +190,11 @@ final class PendingPool
             : $this->leastLoadedActiveCluster();
 
         $template = $this->readyTemplateFor((int) $cluster->template_version);
+
+        $this->templateIntegrityVerifier->assertCurrent(
+            version: (int) $template->version,
+            clusterId: (string) $cluster->id,
+        );
 
         $id = (string) Str::uuid7();
         $dbName = 'acc_'.str_replace('-', '', $id);

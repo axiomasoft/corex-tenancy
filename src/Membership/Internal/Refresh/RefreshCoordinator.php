@@ -26,6 +26,6 @@ final readonly class RefreshCoordinator
             return false;
         }
 
-        return $this->inbox->acknowledge(eventId: $eventId, owner: $owner);
+        return $this->inbox->acknowledge(eventId: $eventId, owner: $owner, now: $now);
     }
 }

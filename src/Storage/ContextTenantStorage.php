@@ -49,6 +49,7 @@ final class ContextTenantStorage implements TenantStorage
 
     public function usageBytes(): int
     {
+        $this->scopedDisk(root: $this->durableRoot)->path('');
         $root = $this->tenantRoot(root: $this->durableRoot);
 
         if (! is_dir($root)) {

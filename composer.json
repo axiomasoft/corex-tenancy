@@ -41,7 +41,7 @@
   "require": {
     "axiomasoft/stancl-jobpipeline": "2.0.0-alpha1",
     "axiomasoft/stancl-tenancy": "4.0.0-alpha1",
-    "corex/core": "0.1.0-p4.3",
+    "corex/core": "0.4.0-alpha.20260918",
     "firebase/php-jwt": "^7.1",
     "illuminate/contracts": "^12.0|^13.0",
     "illuminate/http": "^12.0|^13.0",
@@ -50,8 +50,10 @@
     "php": "^8.4"
   },
   "require-dev": {
+    "corex/wakeup": "@dev",
     "larastan/larastan": "^3.0",
     "laravel/pint": "^1.13",
+    "league/flysystem-aws-s3-v3": "3.35.3",
     "orchestra/testbench": "^10.0|^11.0",
     "pestphp/pest": "^4.0"
   },
@@ -61,6 +63,10 @@
     "lint:check": "pint --test",
     "test": "pest"
   },
+  "suggest": {
+    "corex/wakeup": "Install to opt into root_registry wakeup hints; boxed and local_sweep profiles do not require it.",
+    "league/flysystem-aws-s3-v3": "Install the qualified native S3 adapter to explicitly construct optional ObjectTenantStorage."
+  },
   "type": "library",
-  "version": "0.1.0-p4.3"
+  "version": "0.4.0-alpha.20260918"
 }

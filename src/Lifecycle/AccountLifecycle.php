@@ -10,6 +10,7 @@ use CoreX\Enums\ImpersonationRestrictedAction;
 use CoreX\Events\DomainEvent;
 use CoreX\Tenancy\AccountRef;
 use CoreX\Tenancy\Contracts\TenantDatabaseLifecycle;
+use CoreX\Tenancy\Database\TemplateIntegrityVerifier;
 use CoreX\Tenancy\Events\AccountSuspended;
 use CoreX\Tenancy\Events\GraceStarted;
 use CoreX\Tenancy\Events\TrialStarted;
@@ -48,6 +49,7 @@ final class AccountLifecycle
         private readonly AccountLifecycleFsm $fsm,
         private readonly TenantDatabaseLifecycle $tenantDatabaseLifecycle,
         private readonly ImpersonationGuard $impersonationGuard,
+        private readonly TemplateIntegrityVerifier $templateIntegrityVerifier,
     ) {}
 
     /**
@@ -99,6 +101,7 @@ final class AccountLifecycle
     public function startTrial(AccountRef $account): void
     {
         $this->impersonationGuard->assertAllowed(ImpersonationRestrictedAction::DeleteAccount);
+        $this->assertAccountIntegrity($account->id);
 
         $trialEndsAt = now()->addDays((int) config('tenancy.trial_days', 14));
 
@@ -132,6 +135,7 @@ final class AccountLifecycle
     public function activate(AccountRef $account): void
     {
         $this->impersonationGuard->assertAllowed(ImpersonationRestrictedAction::DeleteAccount);
+        $this->assertAccountIntegrity($account->id);
 
         DB::connection($this->centralConnection)->transaction(function () use ($account): void {
             $this->assertLockedTransition($account->id, 'active');
@@ -164,6 +168,7 @@ final class AccountLifecycle
     public function resume(AccountRef $account): void
     {
         $this->impersonationGuard->assertAllowed(ImpersonationRestrictedAction::DeleteAccount);
+        $this->assertAccountIntegrity($account->id);
 
         DB::connection($this->centralConnection)->transaction(function () use ($account): void {
             $this->assertLockedTransition($account->id, 'active');
@@ -243,6 +248,7 @@ final class AccountLifecycle
             $latestExportStatus = DB::connection($this->centralConnection)->table('root_account_exports')
                 ->where('account_id', $account->id)
                 ->orderByDesc('created_at')
+                ->orderByDesc('id')
                 ->value('status');
 
             if ($latestExportStatus !== 'ready') {
@@ -282,6 +288,13 @@ final class AccountLifecycle
             throw new RuntimeException("Account [{$accountId}] not found in root_accounts.");
         }
         $this->fsm->assertTransition((string) $status, $to);
+    }
+
+    private function assertAccountIntegrity(string $accountId): void
+    {
+        $account = Account::on($this->centralConnection)->findOrFail($accountId);
+
+        $this->templateIntegrityVerifier->assertAccount($account);
     }
 
     /**

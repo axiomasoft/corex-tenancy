@@ -37,7 +37,17 @@ final class TemplateIntegrityVerifier implements TemplateIntegrityVerifierContra
 
     public function assertAccount(object $account): object
     {
-        return $this->assertCurrent(version: (int) $account->template_version, clusterId: (string) $account->cluster_id);
+        $template = $this->assertCurrent(
+            version: (int) $account->template_version,
+            clusterId: (string) $account->cluster_id,
+        );
+        $actualHash = $this->actualHashForDatabase((string) $account->db_name);
+
+        if ($actualHash !== $template->schema_hash) {
+            throw new TemplateIntegrityException('The account database no longer matches its trusted template schema.');
+        }
+
+        return $template;
     }
 
     private function verify(?string $templateId, ?int $version, ?string $clusterId): object
@@ -81,9 +91,14 @@ final class TemplateIntegrityVerifier implements TemplateIntegrityVerifierContra
 
     private function actualHash(object $template): string
     {
+        return $this->actualHashForDatabase((string) $template->db_name);
+    }
+
+    private function actualHashForDatabase(string $database): string
+    {
         $central = DB::connection($this->centralConnection);
         $configuration = $central->getConfig();
-        $configuration['database'] = $template->db_name;
+        $configuration['database'] = $database;
         $connection = (new ConnectionFactory(app()))->make($configuration, 'corex-template-catalogue');
 
         try {

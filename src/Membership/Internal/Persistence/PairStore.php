@@ -11,9 +11,23 @@ use stdClass;
 /** @internal Disposable PostgreSQL reference store; it is deliberately unregistered. */
 final readonly class PairStore
 {
-    private const string Table = 'membership_pair_references';
+    private const string ReferenceTable = 'membership_pair_references';
 
-    public function __construct(private ConnectionInterface $connection) {}
+    private const string PhysicalTable = 'tnt_membership_pairs';
+
+    public function __construct(
+        private ConnectionInterface $connection,
+        private string $table = self::ReferenceTable,
+    ) {
+        if (! in_array($table, [self::ReferenceTable, self::PhysicalTable], true)) {
+            throw new PairStoreViolation('Pair store table is not an approved mapping.');
+        }
+    }
+
+    public function isFor(ConnectionInterface $connection): bool
+    {
+        return $this->connection === $connection;
+    }
 
     public function read(PairKey $key): PairState
     {
@@ -37,7 +51,7 @@ final readonly class PairStore
             }
 
             $this->connection->affectingStatement(
-                query: 'UPDATE '.self::Table.' SET operation_fence = operation_fence + 1, operation_id = :operation_id WHERE account_id = :account_id AND identity_id = :identity_id',
+                query: 'UPDATE '.$this->table.' SET operation_fence = operation_fence + 1, operation_id = :operation_id WHERE account_id = :account_id AND identity_id = :identity_id',
                 bindings: [
                     'operation_id' => $operationId,
                     'account_id' => $key->accountId,
@@ -49,28 +63,42 @@ final readonly class PairStore
         });
     }
 
-    public function apply(PairKey $key, string $operationId, string $revision, string $revokeGeneration): PairState
+    public function apply(PairKey $key, string $operationId, string $revision, string $revokeGeneration, ?string $snapshotDigest = null): PairState
     {
         Value::uuid($operationId);
         Value::counter($revision);
         Value::counter($revokeGeneration);
+        $this->assertSnapshotDigest($snapshotDigest);
 
-        return $this->connection->transaction(function () use ($key, $operationId, $revision, $revokeGeneration): PairState {
+        return $this->connection->transaction(function () use ($key, $operationId, $revision, $revokeGeneration, $snapshotDigest): PairState {
             $current = $this->assertCurrentOperation($key, $operationId);
 
             if (self::compare($revision, $current->revision) < 0 || self::compare($revokeGeneration, $current->revokeGeneration) < 0) {
                 throw new PairStoreViolation('Revision or revoke generation regression is denied.');
             }
 
+            if (self::compare($revision, $current->revision) === 0
+                && $current->snapshotDigest !== null
+                && (! hash_equals($current->snapshotDigest, (string) $snapshotDigest)
+                    || $current->revokeGeneration !== $revokeGeneration)) {
+                throw new PairStoreViolation('Equal revision with a conflicting authority snapshot is denied.');
+            }
+
+            $bindings = [
+                'revision' => $revision,
+                'revoke_generation' => $revokeGeneration,
+                'account_id' => $key->accountId,
+                'identity_id' => $key->identityId,
+                'operation_id' => $operationId,
+            ];
+
+            if ($this->physical()) {
+                $bindings['snapshot_digest'] = $snapshotDigest;
+            }
+
             $this->connection->affectingStatement(
-                query: 'UPDATE '.self::Table.' SET revision = :revision, revoke_generation = :revoke_generation, applied_operation_id = :operation_id WHERE account_id = :account_id AND identity_id = :identity_id AND operation_id = :operation_id',
-                bindings: [
-                    'revision' => $revision,
-                    'revoke_generation' => $revokeGeneration,
-                    'account_id' => $key->accountId,
-                    'identity_id' => $key->identityId,
-                    'operation_id' => $operationId,
-                ],
+                query: 'UPDATE '.$this->table.' SET revision = :revision, revoke_generation = :revoke_generation, applied_operation_id = :operation_id'.$this->snapshotUpdateClause().' WHERE account_id = :account_id AND identity_id = :identity_id AND operation_id = :operation_id',
+                bindings: $bindings,
             );
 
             return $this->lockedState($key);
@@ -94,7 +122,7 @@ final readonly class PairStore
             }
 
             return $this->connection->affectingStatement(
-                query: 'UPDATE '.self::Table.' SET application_fence = operation_fence WHERE account_id = :account_id AND identity_id = :identity_id AND operation_id = :operation_id AND denied = false',
+                query: 'UPDATE '.$this->table.' SET application_fence = operation_fence WHERE account_id = :account_id AND identity_id = :identity_id AND operation_id = :operation_id AND denied = false',
                 bindings: [
                     'account_id' => $key->accountId,
                     'identity_id' => $key->identityId,
@@ -121,7 +149,7 @@ final readonly class PairStore
             }
 
             $this->connection->affectingStatement(
-                query: 'UPDATE '.self::Table.' SET denied = false, application_fence = NULL WHERE account_id = :account_id AND identity_id = :identity_id AND operation_id = :operation_id',
+                query: 'UPDATE '.$this->table.' SET denied = false, application_fence = NULL WHERE account_id = :account_id AND identity_id = :identity_id AND operation_id = :operation_id',
                 bindings: [
                     'account_id' => $key->accountId,
                     'identity_id' => $key->identityId,
@@ -146,7 +174,7 @@ final readonly class PairStore
             }
 
             $this->connection->affectingStatement(
-                query: 'UPDATE '.self::Table.' SET local_epoch = local_epoch + 1, barrier_id = :barrier_id, denied = true, application_fence = NULL, operation_id = NULL, applied_operation_id = NULL WHERE account_id = :account_id AND identity_id = :identity_id',
+                query: 'UPDATE '.$this->table.' SET local_epoch = local_epoch + 1, barrier_id = :barrier_id, denied = true, application_fence = NULL, operation_id = NULL, applied_operation_id = NULL WHERE account_id = :account_id AND identity_id = :identity_id',
                 bindings: [
                     'barrier_id' => $barrierId,
                     'account_id' => $key->accountId,
@@ -176,7 +204,7 @@ final readonly class PairStore
             }
 
             $this->connection->affectingStatement(
-                query: 'UPDATE '.self::Table.' SET revision = :revision, revoke_generation = :revoke_generation, local_epoch = :local_epoch, operation_fence = :operation_fence, application_fence = NULL, denied = true WHERE account_id = :account_id AND identity_id = :identity_id',
+                query: 'UPDATE '.$this->table.' SET revision = :revision, revoke_generation = :revoke_generation, local_epoch = :local_epoch, operation_fence = :operation_fence, application_fence = NULL, denied = true, operation_id = NULL, applied_operation_id = NULL, barrier_id = NULL WHERE account_id = :account_id AND identity_id = :identity_id',
                 bindings: [
                     'revision' => $witness->revision,
                     'revoke_generation' => $witness->revokeGeneration,
@@ -206,10 +234,11 @@ final readonly class PairStore
     private function ensureExists(PairKey $key): void
     {
         $this->connection->affectingStatement(
-            query: 'INSERT INTO '.self::Table.' (account_id, identity_id, revision, revoke_generation, local_epoch, operation_fence, denied) VALUES (:account_id, :identity_id, 0, 0, 0, 0, false) ON CONFLICT (account_id, identity_id) DO NOTHING',
+            query: 'INSERT INTO '.$this->table.' (account_id, identity_id, revision, revoke_generation, local_epoch, operation_fence, denied) VALUES (:account_id, :identity_id, 0, 0, 0, 0, :denied) ON CONFLICT (account_id, identity_id) DO NOTHING',
             bindings: [
                 'account_id' => $key->accountId,
                 'identity_id' => $key->identityId,
+                'denied' => $this->physical(),
             ],
         );
     }
@@ -218,7 +247,7 @@ final readonly class PairStore
     {
         /** @var stdClass $row */
         $row = $this->connection->selectOne(
-            query: 'SELECT revision, revoke_generation, local_epoch, operation_fence, application_fence, operation_id, applied_operation_id, barrier_id, denied FROM '.self::Table.' WHERE account_id = :account_id AND identity_id = :identity_id FOR UPDATE',
+            query: 'SELECT revision, revoke_generation, local_epoch, operation_fence, application_fence, operation_id, applied_operation_id, barrier_id, denied'.$this->snapshotSelectClause().' FROM '.$this->table.' WHERE account_id = :account_id AND identity_id = :identity_id FOR UPDATE',
             bindings: [
                 'account_id' => $key->accountId,
                 'identity_id' => $key->identityId,
@@ -235,7 +264,34 @@ final readonly class PairStore
             appliedOperationId: $row->applied_operation_id === null ? null : (string) $row->applied_operation_id,
             barrierId: $row->barrier_id === null ? null : (string) $row->barrier_id,
             denied: (bool) $row->denied,
+            snapshotDigest: $this->physical() && $row->snapshot_digest !== null ? (string) $row->snapshot_digest : null,
         );
+    }
+
+    private function physical(): bool
+    {
+        return $this->table === self::PhysicalTable;
+    }
+
+    private function assertSnapshotDigest(?string $snapshotDigest): void
+    {
+        if ($this->physical() && $snapshotDigest === null) {
+            throw new PairStoreViolation('Production pair mapping requires a snapshot digest.');
+        }
+
+        if ($snapshotDigest !== null && preg_match('/^[a-f0-9]{64}$/', $snapshotDigest) !== 1) {
+            throw new PairStoreViolation('Snapshot digest must be a canonical SHA-256 value.');
+        }
+    }
+
+    private function snapshotSelectClause(): string
+    {
+        return $this->physical() ? ', snapshot_digest' : '';
+    }
+
+    private function snapshotUpdateClause(): string
+    {
+        return $this->physical() ? ', snapshot_digest = :snapshot_digest' : '';
     }
 
     private static function compare(string $left, string $right): int

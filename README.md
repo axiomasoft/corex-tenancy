@@ -3,6 +3,13 @@
 Laravel tenancy primitives for CoreX's physical PostgreSQL database-per-account
 profile.
 
+## Optional wakeup root hints
+
+`corex-tenancy.wakeup.driver` defaults to `local_sweep`. With `corex/wakeup` installed, a cloud
+deployment may explicitly select `root_registry`; this enables the advisory `root_wakeup_hints`
+table and the `corex:wakeup:root-sweep` command. Hints never replace a tenant-local request or
+provide authority to select an account connection.
+
 ## Local immutable provider proof
 
 The unreleased `4.0.0-alpha1` tenancy candidate is tested only through the

@@ -7,6 +7,8 @@ namespace CoreX\Tenancy\Migrations;
 use Closure;
 use CoreX\Tenancy\AccountRef;
 use CoreX\Tenancy\Contracts\TenancyManager;
+use CoreX\Tenancy\Database\TemplateIntegrityVerifier;
+use CoreX\Tenancy\Models\Account;
 use CoreX\Tenancy\Models\AccountSchemaState;
 use CoreX\Tenancy\Models\MigrationBatch;
 use Illuminate\Database\Eloquent\Collection;
@@ -35,6 +37,7 @@ final class MigrationWaveOrchestrator
     public function __construct(
         private readonly string $centralConnection,
         private readonly TenancyManager $tenancy,
+        private readonly TemplateIntegrityVerifier $templateIntegrityVerifier,
         private readonly ?Closure $migrationRunner = null,
     ) {}
 
@@ -42,6 +45,8 @@ final class MigrationWaveOrchestrator
     {
         /** @var MigrationBatch $batch */
         $batch = MigrationBatch::query()->findOrFail($batchId);
+
+        $this->assertBatchIntegrity();
 
         $batch->forceFill(['status' => 'running', 'started_at' => $batch->started_at ?? now()])->save();
 
@@ -53,6 +58,15 @@ final class MigrationWaveOrchestrator
         }
 
         $batch->forceFill(['status' => 'done', 'finished_at' => now()])->save();
+    }
+
+    private function assertBatchIntegrity(): void
+    {
+        Account::query()
+            ->whereNull('deleted_at')
+            ->each(function (Account $account): void {
+                $this->templateIntegrityVerifier->assertAccount($account);
+            });
     }
 
     /**

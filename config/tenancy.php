@@ -145,6 +145,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Custom-domain trust SPI (P3.1)
+    |--------------------------------------------------------------------------
+    |
+    | CoreX owns only the durable trusted-state transition. A consuming
+    | application must bind all four contracts when it deliberately enables
+    | this lane; no default DNS, HTTP, TLS, credential, or proof adapter ships
+    | with the package.
+    |
+    */
+    'domain_trust' => [
+        'enabled' => (bool) env('TENANCY_DOMAIN_TRUST_ENABLED', false),
+        'challenge_ttl_seconds' => (int) env('TENANCY_DOMAIN_TRUST_CHALLENGE_TTL_SECONDS', 300),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Account status gate (P2.10, B-11 §5.1)
     |--------------------------------------------------------------------------
     | `payment_route`/`export_route` accept either a route NAME or a path

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CoreX\Tenancy\Provisioning;
 
 use CoreX\Tenancy\Contracts\TenantDatabaseProvisioner;
+use CoreX\Tenancy\Database\TemplateIntegrityVerifier;
 use CoreX\Tenancy\Jobs\CreateDatabaseFromTemplate;
 use CoreX\Tenancy\Models\Account;
 use CoreX\Tenancy\ProvisionParams;
@@ -23,10 +24,16 @@ final class StanclTenantDatabaseProvisioner implements TenantDatabaseProvisioner
 {
     public function __construct(
         private readonly string $centralConnection,
+        private readonly TemplateIntegrityVerifier $templateIntegrityVerifier,
     ) {}
 
     public function provision(ProvisionParams $params): void
     {
+        $this->templateIntegrityVerifier->assertCurrent(
+            version: $params->templateVersion,
+            clusterId: $params->clusterId,
+        );
+
         $account = Account::on($this->centralConnection)->findOrFail($params->accountId);
 
         $account->forceFill([

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Added unregistered internal accounts-list transport and Redis display cache
+  adapters. Both require explicit consumer construction, retain the strict
+  authenticated/no-store channel profile, and never make menu data authority.
+
+- Add an unregistered final credential-write admission boundary that keeps the pair lock, lease samples, callback SQL, and application fence on one connection transaction.
+
+- Added an explicitly constructed, tenant-lane physical pair/inbox mapping for
+  membership adapters. It is denied by default, requires canonical snapshot
+  digests and UUID inbox workers, and is never registered automatically.
+
+- Export and physical DROP now require the existing consumer integrity verifier
+  for every archive, including local files. Size-only writers and legacy ready
+  flags fail closed until the same qualified verifier is configured for export
+  and purge; constructor and public contract signatures are unchanged. The
+  verifier must bind readability, size, digest and tenant ownership to a trusted
+  durable manifest.
+- Latest-export selection uses the generated UUID as a deterministic tie-break
+  when timestamps match, preserving refusal after a newer interrupted export.
+
+- Added optional, explicitly constructed private `ObjectTenantStorage` using
+  qualified Flysystem S3 adapter 3.35.3. Object paths, URLs, usage and export
+  are explicitly unsupported; ephemeral files remain account-scoped local files.
+- Queue workspace restoration clears previous workspace for same-account jobs
+  and refuses unavailable queued workspaces. Local storage usage refuses root symlinks.
+- Package tests now discover per-package PostgreSQL conformance cases.
+
 - The package now requires the sealed, immutable local-candidate provider pair
   `axiomasoft/stancl-tenancy` `4.0.0-alpha1` and
   `axiomasoft/stancl-jobpipeline` `2.0.0-alpha1`. These are not published

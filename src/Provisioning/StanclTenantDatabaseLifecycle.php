@@ -19,7 +19,9 @@ use RuntimeException;
  * already used by {@see PendingPool::clearPending()}.
  *
  * The host supplies a writer that returns a durable archive path and size.
- * Remote writers must also supply a verifier for their storage backend.
+ * Every writer must supply a verifier binding readable bytes, size, content
+ * digest and tenant ownership to a trusted durable archive manifest. Size
+ * alone never authorizes ready or DROP, including local archives.
  */
 final class StanclTenantDatabaseLifecycle implements TenantDatabaseLifecycle
 {
@@ -38,6 +40,7 @@ final class StanclTenantDatabaseLifecycle implements TenantDatabaseLifecycle
         if ($this->writer === null) {
             throw new RuntimeException('No tenant export writer configured; refusing to create a ready export.');
         }
+        $this->archiveVerifier();
 
         $exportId = (string) Str::uuid7();
 
@@ -80,6 +83,7 @@ final class StanclTenantDatabaseLifecycle implements TenantDatabaseLifecycle
         $latestExport = DB::connection($this->centralConnection)->table('root_account_exports')
             ->where('account_id', $account->id)
             ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->first();
 
         if ($latestExport === null || $latestExport->status !== 'ready') {
@@ -105,13 +109,16 @@ final class StanclTenantDatabaseLifecycle implements TenantDatabaseLifecycle
 
     private function verifyArchive(string $path, int $size): void
     {
-        clearstatcache(true, $path);
-        $verified = $path !== '' && $size > 0 && ($this->verifier !== null
-            ? ($this->verifier)($path, $size)
-            : is_file($path) && is_readable($path) && filesize($path) === $size);
+        $verifier = $this->archiveVerifier();
+        $verified = $path !== '' && $size > 0 && $verifier($path, $size);
 
         if (! $verified) {
             throw new RuntimeException('Tenant export archive is unavailable or has an invalid size; refusing ready/DROP.');
         }
+    }
+
+    private function archiveVerifier(): Closure
+    {
+        return $this->verifier ?? throw new RuntimeException('A qualified tenant archive integrity verifier is required; refusing ready/DROP.');
     }
 }

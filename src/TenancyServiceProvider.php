@@ -10,6 +10,10 @@ use CoreX\Tenancy\Commands\IdentitiesReconcileCommand;
 use CoreX\Tenancy\Commands\PendingClearCommand;
 use CoreX\Tenancy\Commands\PendingCreateCommand;
 use CoreX\Tenancy\Commands\TenantsMigrateCommand;
+use CoreX\Tenancy\Contracts\DomainChallengeStore;
+use CoreX\Tenancy\Contracts\DomainOwnershipProofVerifier;
+use CoreX\Tenancy\Contracts\DomainTrustAuthorizer;
+use CoreX\Tenancy\Contracts\DomainTrustPolicy;
 use CoreX\Tenancy\Contracts\ImpersonationService;
 use CoreX\Tenancy\Contracts\PrincipalWorkspaceResolver;
 use CoreX\Tenancy\Contracts\TemplateIntegrityVerifier;
@@ -19,6 +23,9 @@ use CoreX\Tenancy\Contracts\TenantDatabaseLifecycle;
 use CoreX\Tenancy\Database\SchemaCatalogueSerializer;
 use CoreX\Tenancy\Database\TemplateIntegrityLock;
 use CoreX\Tenancy\Database\TemplateIntegrityVerifier as DatabaseTemplateIntegrityVerifier;
+use CoreX\Tenancy\DomainTrust\DomainTrustCoordinator;
+use CoreX\Tenancy\DomainTrust\DomainTrustDisabled;
+use CoreX\Tenancy\DomainTrust\DomainTrustStateWriter;
 use CoreX\Tenancy\Http\Controllers\LogoutController;
 use CoreX\Tenancy\Http\Middleware\AccountStatusGate;
 use CoreX\Tenancy\Http\Middleware\AllowImpersonatedWrites;
@@ -45,9 +52,16 @@ use CoreX\Tenancy\Provisioning\StanclTenantDatabaseLifecycle;
 use CoreX\Tenancy\Provisioning\StanclTenantDatabaseProvisioner;
 use CoreX\Tenancy\Resolvers\HostTenantResolver;
 use CoreX\Tenancy\Storage\ContextTenantStorage;
+use CoreX\Tenancy\Wakeup\Commands\SweepRootWakeups;
+use CoreX\Tenancy\Wakeup\Internal\RootRegistryWakeupHint;
+use CoreX\Tenancy\Wakeup\Internal\RootWakeupReconciler;
 use CoreX\Tenancy\Workspaces\DatabaseWorkspaceResolver;
 use CoreX\Tenancy\Workspaces\WorkspaceResolver;
+use CoreX\Wakeup\Contracts\WakeupHint;
+use CoreX\Wakeup\Contracts\WakeupSweeper;
+use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Filesystem\FilesystemManager;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Routing\Router;
@@ -70,11 +84,13 @@ final class TenancyServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/tenancy.php', 'tenancy');
+        $this->mergeConfigFrom(__DIR__.'/../config/corex-tenancy.php', 'corex-tenancy');
 
         $this->app->singleton(
             StanclTenantDatabaseProvisioner::class,
-            static fn (): StanclTenantDatabaseProvisioner => new StanclTenantDatabaseProvisioner(
-                (string) config('tenancy.central_connection'),
+            static fn (Application $app): StanclTenantDatabaseProvisioner => new StanclTenantDatabaseProvisioner(
+                centralConnection: (string) config('tenancy.central_connection'),
+                templateIntegrityVerifier: $app->make(DatabaseTemplateIntegrityVerifier::class),
             ),
         );
 
@@ -93,11 +109,36 @@ final class TenancyServiceProvider extends ServiceProvider
             static fn (Application $app): DatabaseTemplateIntegrityVerifier => $app->make(DatabaseTemplateIntegrityVerifier::class),
         );
 
+        $this->app->scoped(
+            DomainTrustStateWriter::class,
+            static fn (): DomainTrustStateWriter => new DomainTrustStateWriter(
+                centralConnection: (string) config('tenancy.central_connection'),
+            ),
+        );
+        $this->app->scoped(
+            DomainTrustCoordinator::class,
+            static function (Application $app): DomainTrustCoordinator {
+                if (! (bool) config('tenancy.domain_trust.enabled')) {
+                    throw new DomainTrustDisabled('Custom-domain verification is disabled.');
+                }
+
+                return new DomainTrustCoordinator(
+                    policy: $app->make(DomainTrustPolicy::class),
+                    challengeStore: $app->make(DomainChallengeStore::class),
+                    proofVerifier: $app->make(DomainOwnershipProofVerifier::class),
+                    authorizer: $app->make(DomainTrustAuthorizer::class),
+                    stateWriter: $app->make(DomainTrustStateWriter::class),
+                    challengeTtlSeconds: (int) config('tenancy.domain_trust.challenge_ttl_seconds'),
+                );
+            },
+        );
+
         $this->app->singleton(
             PendingPool::class,
             static fn (Application $app): PendingPool => new PendingPool(
-                (string) config('tenancy.central_connection'),
-                $app->make(StanclTenantDatabaseProvisioner::class),
+                centralConnection: (string) config('tenancy.central_connection'),
+                provisioner: $app->make(StanclTenantDatabaseProvisioner::class),
+                templateIntegrityVerifier: $app->make(DatabaseTemplateIntegrityVerifier::class),
             ),
         );
 
@@ -124,6 +165,7 @@ final class TenancyServiceProvider extends ServiceProvider
                 fsm: $app->make(AccountLifecycleFsm::class),
                 tenantDatabaseLifecycle: $app->make(TenantDatabaseLifecycle::class),
                 impersonationGuard: $app->make(ImpersonationGuard::class),
+                templateIntegrityVerifier: $app->make(DatabaseTemplateIntegrityVerifier::class),
             ),
         );
 
@@ -133,6 +175,7 @@ final class TenancyServiceProvider extends ServiceProvider
             static fn (Application $app): MigrationWaveOrchestrator => new MigrationWaveOrchestrator(
                 centralConnection: (string) config('tenancy.central_connection'),
                 tenancy: $app->make(TenancyManager::class),
+                templateIntegrityVerifier: $app->make(DatabaseTemplateIntegrityVerifier::class),
             ),
         );
 
@@ -175,6 +218,35 @@ final class TenancyServiceProvider extends ServiceProvider
         // key without a consumer is a fabricated contract, D116/D121).
         $this->app->singleton(WorkspaceResolver::class, DatabaseWorkspaceResolver::class);
         $this->app->bindIf(PrincipalWorkspaceResolver::class, DatabaseWorkspaceResolver::class);
+
+        // Wakeup remains entirely optional: the default local_sweep profile
+        // needs neither this binding nor a root connection.
+        if (
+            config('corex-tenancy.wakeup.driver') === 'root_registry'
+            && interface_exists(WakeupHint::class)
+            && interface_exists(WakeupSweeper::class)
+        ) {
+            $this->app->singleton(
+                RootRegistryWakeupHint::class,
+                static fn (Application $app): RootRegistryWakeupHint => new RootRegistryWakeupHint(
+                    root: $app['db']->connection((string) config('corex-tenancy.wakeup.root_connection')),
+                ),
+            );
+            $this->app->tag(RootRegistryWakeupHint::class, 'corex.wakeup.hints');
+            $this->app->singleton(
+                RootWakeupReconciler::class,
+                static fn (Application $app): RootWakeupReconciler => new RootWakeupReconciler(
+                    root: $app['db']->connection((string) config('corex-tenancy.wakeup.root_connection')),
+                    tenancy: $app->make(TenancyManager::class),
+                    sweeper: $app->make(WakeupSweeper::class),
+                    leaseSeconds: (int) config('corex-tenancy.wakeup.lease_seconds'),
+                ),
+            );
+
+            if ($this->app->runningInConsole()) {
+                $this->commands([SweepRootWakeups::class]);
+            }
+        }
 
         // P2.22 — cloud OIDC login lane, entirely opt-in (AC-28): binding a
         // closure does not execute firebase/php-jwt, only resolving it does,
@@ -346,6 +418,16 @@ final class TenancyServiceProvider extends ServiceProvider
         // package still pushes nothing onto the consumer's global stack
         // either way (D10) — the 'tenant' group below is opt-in per route.
         if (config('tenancy.host_identification.enabled')) {
+            // Идентифицируем account до auth: пользователь лежит в tenant БД.
+            $this->app->afterResolving(HttpKernel::class, static function (HttpKernel $kernel): void {
+                if (method_exists($kernel, 'addToMiddlewarePriorityBefore')) {
+                    $kernel->addToMiddlewarePriorityBefore(
+                        before: AuthenticatesRequests::class,
+                        middleware: ResolveTenantFromHost::class,
+                    );
+                }
+            });
+
             // Same projection reasoning as `bootstrapper_order`/`cache_prefix`
             // above — own top-level key wins over stancl's own
             // TenancyServiceProvider::register() regardless of provider order.

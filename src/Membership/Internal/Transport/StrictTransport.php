@@ -13,10 +13,17 @@ use CoreX\Tenancy\Central\MembershipSnapshot;
 use CoreX\Tenancy\Central\RevokeMembershipReceipt;
 use CoreX\Tenancy\Central\RevokeMembershipRequest;
 use CoreX\Tenancy\Contracts\CentralApiClient;
+use CoreX\Tenancy\Membership\Internal\Switcher\AccountListEntry;
+use CoreX\Tenancy\Membership\Internal\Switcher\AccountsQuery;
+use CoreX\Tenancy\Membership\Internal\Switcher\AccountsResult;
+use DateTimeImmutable;
+use DateTimeZone;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
+use Throwable;
 
 /** @internal Unregistered local transport, no default endpoints or authority writer. */
 final class StrictTransport implements CentralApiClient
@@ -106,6 +113,41 @@ final class StrictTransport implements CentralApiClient
         return $receipt;
     }
 
+    /**
+     * Internal, explicitly composed accounts-list read.  There is deliberately
+     * no binding field, default URI, or provider registration for this profile
+     * extension: the supplied URI must be the already-negotiated read URI.
+     */
+    public function accountsFor(AccountsQuery $query, string $accountsUri): AccountsResult
+    {
+        if ($this->binding === null || $accountsUri !== $this->binding->readUri) {
+            throw new CentralUnavailable('Accepted accounts read URI is absent.');
+        }
+
+        $context = ($this->context)();
+
+        if ($context === null || $context['product'] !== $query->product) {
+            throw new CentralUnauthorized('Trusted tenant context mismatch.');
+        }
+
+        $http = $this->request(accountId: $context['accountId'], product: $query->product, capability: 'accounts.read');
+        $requestId = Str::uuid()->toString();
+
+        try {
+            $response = $http->get($accountsUri.'?'.http_build_query([
+                'identity_id' => $query->identityId,
+                'product' => $query->product,
+                'request_id' => $requestId,
+            ], encoding_type: PHP_QUERY_RFC3986));
+        } catch (ConnectionException) {
+            throw new CentralUnavailable('Central accounts read unavailable.');
+        }
+
+        $this->assertResponse(response: $response, revokeId: null);
+
+        return $this->accountsResult(payload: StrictJson::object($response->body()), query: $query, requestId: $requestId);
+    }
+
     private function request(string $accountId, string $product, string $capability): PendingRequest
     {
         $context = ($this->context)();
@@ -155,6 +197,70 @@ final class StrictTransport implements CentralApiClient
     {
         if ($response->requestId !== $requestId || $response->identityId !== $identityId || $response->accountId !== $accountId || $response->product !== $product) {
             throw new CentralProtocolViolation('Membership response correlation/context mismatch.');
+        }
+    }
+
+    /** @param array<string, mixed> $payload */
+    private function accountsResult(array $payload, AccountsQuery $query, string $requestId): AccountsResult
+    {
+        $expected = ['accounts', 'identity_id', 'membership_version', 'observed_at', 'product', 'profile_version', 'request_id'];
+        $keys = array_keys($payload);
+        sort($keys);
+
+        if ($keys !== $expected
+            || $payload['profile_version'] !== 'corex-membership/1'
+            || $payload['request_id'] !== $requestId
+            || $payload['identity_id'] !== $query->identityId
+            || $payload['product'] !== $query->product
+            || ! is_string($payload['membership_version'])
+            || ! is_string($payload['observed_at'])
+            || ! is_array($payload['accounts'])) {
+            throw new CentralProtocolViolation('Invalid accounts response envelope.');
+        }
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/D', $payload['observed_at']) !== 1) {
+            throw new CentralProtocolViolation('Accounts observation must be canonical UTC RFC3339.');
+        }
+
+        try {
+            $observedAt = (new DateTimeImmutable($payload['observed_at']))->setTimezone(new DateTimeZone('+00:00'));
+            $accounts = array_map(function (mixed $account): AccountListEntry {
+                if (! is_object($account)) {
+                    throw new CentralProtocolViolation('Invalid accounts response entry.');
+                }
+                $entry = get_object_vars($account);
+                $keys = array_keys($entry);
+                sort($keys);
+
+                if ($keys !== ['account_id', 'name', 'primary_host', 'slug', 'status']
+                    || ! is_string($entry['account_id'])
+                    || ! is_string($entry['name'])
+                    || ! is_string($entry['slug'])
+                    || ! is_string($entry['primary_host'])
+                    || ! is_string($entry['status'])) {
+                    throw new CentralProtocolViolation('Invalid accounts response entry.');
+                }
+
+                return new AccountListEntry(
+                    accountId: $entry['account_id'],
+                    name: $entry['name'],
+                    slug: $entry['slug'],
+                    primaryHost: $entry['primary_host'],
+                    status: $entry['status'],
+                );
+            }, $payload['accounts']);
+
+            return new AccountsResult(
+                identityId: $query->identityId,
+                product: $query->product,
+                membershipVersion: $payload['membership_version'],
+                accounts: $accounts,
+                observedAt: $observedAt,
+            );
+        } catch (CentralProtocolViolation) {
+            throw new CentralProtocolViolation('Invalid accounts response payload.');
+        } catch (Throwable) {
+            throw new CentralProtocolViolation('Invalid accounts response payload.');
         }
     }
 

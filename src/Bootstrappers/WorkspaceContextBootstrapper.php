@@ -13,6 +13,7 @@ use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Queue\Events\JobRetryRequested;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\Testing\Fakes\QueueFake;
+use RuntimeException;
 use Stancl\Tenancy\Bootstrappers\QueueTenancyBootstrapper;
 use Stancl\Tenancy\Contracts\TenancyBootstrapper;
 use Stancl\Tenancy\Contracts\Tenant;
@@ -85,22 +86,23 @@ final class WorkspaceContextBootstrapper implements TenancyBootstrapper
 
     private static function restore(Application $app, ?string $workspaceId): void
     {
+        /** @var TenancyManager $manager */
+        $manager = $app->make(TenancyManager::class);
+        $manager->setWorkspace(null);
+
         if ($workspaceId === null) {
             return;
         }
 
-        /** @var TenancyManager $manager */
-        $manager = $app->make(TenancyManager::class);
-
         if (! $manager->initialized()) {
-            return;
+            throw new RuntimeException('Queued workspace context requires an initialized account.');
         }
 
         /** @var ?Workspace $row */
         $row = Workspace::query()->find($workspaceId);
 
         if ($row === null) {
-            return;
+            throw new RuntimeException('Queued workspace context is unavailable.');
         }
 
         $manager->setWorkspace(new WorkspaceRef(

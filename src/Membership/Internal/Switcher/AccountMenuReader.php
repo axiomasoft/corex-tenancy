@@ -20,7 +20,11 @@ final readonly class AccountMenuReader
 
     public function read(AccountsQuery $query): AccountMenu
     {
-        $version = $this->cache->versionFor(query: $query);
+        try {
+            $version = $this->cache->versionFor(query: $query);
+        } catch (Throwable) {
+            return AccountMenu::unavailable();
+        }
 
         if ($version !== null) {
             $cached = $this->cache->resultFor(query: $query, membershipVersion: $version);
